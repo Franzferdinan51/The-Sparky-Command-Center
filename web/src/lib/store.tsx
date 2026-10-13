@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { syncServerClock } from './format'
 import {
   getChatStatus, getComfy, getConfig, getMetrics, getStations, getTokens,
   type ChatStatus, type ComfyLane, type Metrics, type Res, type Station, type Tokens, type UiConfig,
@@ -45,6 +46,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const cfg = usePoll(getConfig, 0)
   const refresh = cfg.data?.refresh_ms || 2500
   const m = usePoll(getMetrics, refresh)
+  // align "updated Ns ago" to the server clock on every metrics response
+  useEffect(() => { syncServerClock(m.data?.ts) }, [m.at])  // once per response, not per render
   const comfy = usePoll(getComfy, 5000, !!cfg.data?.comfy.enabled)
   const tokens = usePoll(getTokens, 30000, !!cfg.data?.tokens.enabled)
   const stations = usePoll(getStations, 30000, !!cfg.data?.stations.enabled)

@@ -25,8 +25,15 @@ export function fmtTok(n: unknown) {
 
 export const fmtGB = (b: number | null | undefined) => (isNum(b) ? (b / 1073741824).toFixed(1) : '-')
 
+// Server clock minus viewer clock, in seconds. Every "updated Ns ago" is measured on the SERVER's clock,
+// so a phone or PC whose clock is off by 20 s does not make fresh data look 20 s stale.
+let serverSkew = 0
+export function syncServerClock(serverTs: number | null | undefined) {
+  if (serverTs && serverTs > 1e9) serverSkew = serverTs - Date.now() / 1000
+}
+export function serverNow() { return Date.now() / 1000 + serverSkew }
 export function age(ts: number | null | undefined) {
-  return ts ? Math.max(0, Math.round(Date.now() / 1000 - ts)) : null
+  return ts ? Math.max(0, Math.round(serverNow() - ts)) : null
 }
 
 export function ago(ts: number | null | undefined) {
