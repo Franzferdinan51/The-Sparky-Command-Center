@@ -4,7 +4,7 @@ import { useLayout } from '../lib/layout'
 import { Module } from '../components/Module'
 import { ThemeMenu } from '../components/ThemeMenu'
 import { Empty } from '../components/Panel'
-import { UnifiedCard, GpuCard, HostCard, SwitchCard, ModelCard } from './Cards'
+import { UnifiedCard, GpuCard, HostCard, SwitchCard, ModelCard, TrainingCard } from './Cards'
 import { Video } from './Video'
 import { Tokens } from './Tokens'
 import { Eco } from './Eco'
@@ -36,6 +36,7 @@ export function Board() {
     if (!config) return out
     if (config.eco.enabled) out.push({ id: 'eco', eyebrow: 'Clock ECO mode', title: 'GB10 power caps', tone: 'good', render: () => <Eco /> })
     if (config.tokens.enabled) out.push({ id: 'tokens', eyebrow: 'Token tracker', title: 'Tokens served', subtitle: 'cumulative per model, banked across restarts', tone: 'violet', render: () => <Tokens /> })
+    if (config.training?.enabled) out.push({ id: 'training', eyebrow: 'Unsloth Studio', title: config.training.label, subtitle: 'live run status from the Studio backend', tone: 'amber', render: () => <TrainingModule /> })
     for (const s of config.sections) {
       out.push({ id: s.key, eyebrow: s.eyebrow || s.title, title: s.title, subtitle: s.subtitle, render: () => <FleetSection s={s} subs={subs.subs} toggleSub={subs.toggle} /> })
     }
@@ -75,6 +76,14 @@ export function Board() {
   )
 }
 
+function TrainingModule() {
+  const { metrics } = useDash()
+  if (!metrics) return <Empty>Waiting for the first poll...</Empty>
+  const t = metrics.training
+  if (!t) return <Empty>Training status not available.</Empty>
+  return <div className="cards cards--1"><TrainingCard t={t} stale={Math.max(metrics.thresholds.stale_after_s, 30)} /></div>
+}
+
 /* Keeps "updated Ns ago" lines ticking between polls without re-fetching. */
 function Clock() {
   const [, setT] = useState(0)
@@ -100,7 +109,7 @@ function FleetSection({ s, subs, toggleSub }: { s: SectionCfg; subs: string[]; t
       {unified.length > 0 && (
         <div className="cards cards--4">
           {unified.map(n => n.profile === 'unified' && (
-            <UnifiedCard key={n.key} s={n} hist={hist[`spark:${n.key}:temp`]} warn={nodeCfg(n.key)?.temp_warn ?? th.temp_warn} hot={nodeCfg(n.key)?.temp_hot ?? th.temp_hot} stale={th.stale_after_s} />
+            <UnifiedCard key={n.key} s={n} hist={n.kind === 'apple' ? hist[`spark:${n.key}:util`] : hist[`spark:${n.key}:temp`]} warn={nodeCfg(n.key)?.temp_warn ?? th.temp_warn} hot={nodeCfg(n.key)?.temp_hot ?? th.temp_hot} stale={th.stale_after_s} />
           ))}
         </div>
       )}

@@ -20,6 +20,14 @@
   --core: #ff7a1a; --core-dim: rgba(255, 122, 26, 0.14); --amber: #ffd166; --amber-dim: rgba(255, 209, 102, 0.14); --violet: #ff5fa2;
   --glass: rgba(13, 9, 6, 0.78); --scene-grid: #22160d; --scene-grid-2: #3a2412; --scene-dust: #9a8472;
 }
+:root[data-theme='duck'] {
+  /* Juno: the Mac Studio Dashboard's deep-navy glass, keyed to duck amber. */
+  --bg: #04090f; --bg-1: #060d18; --bg-2: #0a1626; --bg-3: #10233c;
+  --ink: #e9f1fa; --ink-2: #9db4cc; --ink-3: #5d7a99;
+  --line: rgba(233, 241, 250, 0.09); --line-2: rgba(233, 241, 250, 0.17);
+  --core: #ffb547; --core-dim: rgba(255, 181, 71, 0.14); --amber: #ffd166; --amber-dim: rgba(255, 209, 102, 0.14); --violet: #5fb8ff;
+  --glass: rgba(4, 9, 15, 0.8); --on-core: #1a1206; --scene-grid: #0c1a2c; --scene-grid-2: #16304f; --scene-dust: #7d97b5;
+}
 :root[data-theme='breeze'] {
   --bg: #07101c; --bg-1: #0b1524; --bg-2: #0f1b2e; --bg-3: #15233a;
   --ink: #e6eef8; --ink-2: #9aabc2; --ink-3: #5f7089;

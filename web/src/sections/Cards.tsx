@@ -1,4 +1,4 @@
-import type { DiscreteNode, Gpu, ModelState, SwitchState, UnifiedNode } from '../lib/api'
+import type { DiscreteNode, Gpu, ModelState, SwitchState, TrainingState, UnifiedNode } from '../lib/api'
 import { fmtBps, fmtTps, fx, isNum, tempTone, tempWord } from '../lib/format'
 import { Bar, Big, Chip, Fresh, KV, Led, Panel, Pill, Sparkline } from '../components/Panel'
 
@@ -14,8 +14,23 @@ export function UnifiedCard({ s, hist, warn, hot, stale }: { s: UnifiedNode; his
   return (
     <Panel id={`card-node-${s.key}`} dim={!reach} tone={!reach ? 'bad' : undefined}
       title={<><Led on={reach} /> <span>{s.name}</span></>}
-      chips={<>{s.pair && <Chip tone="violet" title={s.pair}>{s.pair}</Chip>}{s.node_id && <Chip>{s.node_id}</Chip>}</>}>
-      {reach ? (
+      chips={<>{s.pair && <Chip tone="violet" title={s.pair}>{s.pair}</Chip>}{s.chip && <Chip tone="core">{s.chip}</Chip>}{s.node_id && <Chip>{s.node_id}</Chip>}</>}>
+      {reach ? (s.kind === 'apple' ? (
+        <>
+          <div className="bigrow">
+            <Big label="GPU util" value={fx(s.util)} unit="%" extra={<Pill tone={isNum(s.util) && s.util > 85 ? 'warn' : 'good'}>{isNum(s.util) && s.util > 85 ? 'BUSY' : 'OK'}</Pill>} />
+            <Big label="CPU" value={fx(s.cpu_pct, 1)} unit="%" />
+            <Big label="Thermal" value={s.thermal || '-'} small />
+          </div>
+          <KV k="Unified mem">{fx(s.mem_used_gib, 1)} / {fx(s.mem_total_gib, 1)} GiB</KV>
+          <Bar pct={s.mem_pct} />
+          <KV k="GPU mem in use">{isNum(s.model_gib) ? `${s.model_gib.toFixed(1)} GiB` : '-'}</KV>
+          <KV k="Swap">{isNum(s.swap_used_mb) ? `${s.swap_used_mb.toFixed(0)} / ${fx(s.swap_total_mb, 0)} MB` : '-'}</KV>
+          {(s.load_avg && s.load_avg.length > 0) && <KV k="Load avg">{s.load_avg.map(v => v.toFixed(2)).join(' · ')}</KV>}
+          {(s.disks || []).map(d => <KV key={d.label} k={`Disk · ${d.label || ''}`}>{isNum(d.used_pct) ? `${d.used_pct.toFixed(0)}% used` : '-'}{isNum(d.free_gib) ? ` · ${d.free_gib.toFixed(0)} GiB free` : ''}</KV>)}
+          <Sparkline values={hist} />
+        </>
+      ) : (
         <>
           <div className="bigrow">
             <Big label="Temp" value={fx(s.temp)} unit="°C" extra={<TempExtra t={s.temp} warn={warn} hot={hot} />} />
@@ -30,7 +45,7 @@ export function UnifiedCard({ s, hist, warn, hot, stale }: { s: UnifiedNode; his
           <KV k="Serving" accent>{s.model || '-'}</KV>
           <Sparkline values={hist} />
         </>
-      ) : <p className="card__err">Unreachable: {s.err || 'no response'}</p>}
+      )) : <p className="card__err">Unreachable: {s.err || 'no response'}</p>}
       <Fresh ts={s.ts} err={reach ? null : s.err} staleAfter={stale} />
     </Panel>
   )
@@ -152,19 +167,56 @@ export function ModelCard({ m, stale }: { m: ModelState; stale: number }) {
       {reach ? (
         <>
           <KV k="Model" accent><span className="mono">{m.model || '-'}</span></KV>
-          <div className={`perf ${busy ? '' : 'is-idle'}`}>
-            <div><span>Decode</span><b className="tnum">{fmtTps(m.decode_tps)}<em>tok/s</em></b></div>
-            <div><span>Prefill</span><b className="tnum violet">{fmtTps(m.prefill_tps)}<em>tok/s</em></b></div>
-            <div><span>TTFT avg</span><b className="tnum">{ttft}</b></div>
-          </div>
-          <KV k="KV-cache">{isNum(m.kv_pct) ? `${m.kv_pct.toFixed(1)} %` : '-'}</KV>
-          <Bar pct={m.kv_pct} />
-          <KV k="Requests">{m.running ?? '-'} running · {m.waiting ?? '-'} waiting</KV>
-          <LiveRow m={m} />
-          {m.gpus && <KV k="On">{m.gpus}</KV>}
+          {m.engine === 'LM Studio' ? (
+            <>
+              {(m.loaded || []).length > 1 && <KV k="Also loaded">{(m.loaded || []).slice(1).join(', ')}</KV>}
+              {isNum(m.context) && <KV k="Context">{m.context.toLocaleString()} tokens</KV>}
+              <KV k="Telemetry">native API · no /metrics stream</KV>
+              {m.gpus && <KV k="On">{m.gpus}</KV>}
+            </>
+          ) : (
+            <>
+              <div className={`perf ${busy ? '' : 'is-idle'}`}>
+                <div><span>Decode</span><b className="tnum">{fmtTps(m.decode_tps)}<em>tok/s</em></b></div>
+                <div><span>Prefill</span><b className="tnum violet">{fmtTps(m.prefill_tps)}<em>tok/s</em></b></div>
+                <div><span>TTFT avg</span><b className="tnum">{ttft}</b></div>
+              </div>
+              <KV k="KV-cache">{isNum(m.kv_pct) ? `${m.kv_pct.toFixed(1)} %` : '-'}</KV>
+              <Bar pct={m.kv_pct} />
+              <KV k="Requests">{m.running ?? '-'} running · {m.waiting ?? '-'} waiting</KV>
+              <LiveRow m={m} />
+              {m.gpus && <KV k="On">{m.gpus}</KV>}
+            </>
+          )}
         </>
       ) : <p className="card__err">{m.label} offline: {m.err || 'no /metrics'}</p>}
       <Fresh ts={m.ts} err={reach ? null : m.err} staleAfter={stale} />
+    </Panel>
+  )
+}
+
+export function TrainingCard({ t, stale }: { t: TrainingState; stale: number }) {
+  const reach = t.reachable
+  const running = reach && t.running
+  return (
+    <Panel id="card-training" className="card--wide" dim={!reach} tone={!reach ? 'bad' : running ? 'amber' : undefined}
+      title={<><Led on={reach} /> <span>{t.label || 'Training'}</span></>}
+      chips={<>{t.phase && <Chip tone={running ? 'amber' : 'muted'}>{t.phase}</Chip>}{t.job_id && <Chip>{t.job_id.replace('job_', '').slice(0, 13)}</Chip>}</>}>
+      {reach ? (running ? (
+        <>
+          <div className="bigrow">
+            <Big label="Step" value={fx(t.step, 0)} unit={t.total_steps ? `/ ${t.total_steps.toLocaleString()}` : ''} />
+            <Big label="Loss" value={isNum(t.loss) ? t.loss.toFixed(3) : '-'} />
+            <Big label="Epoch" value={isNum(t.epoch) ? t.epoch.toFixed(2) : '-'} small />
+          </div>
+          <KV k="Progress">{isNum(t.pct) ? `${t.pct.toFixed(1)} %` : '-'}</KV>
+          <Bar pct={t.pct} />
+          <KV k="Learning rate">{isNum(t.learning_rate) ? t.learning_rate.toExponential(2) : '-'}</KV>
+          {t.message && <KV k="Now"><span className="mono">{t.message}</span></KV>}
+        </>
+      ) : <p className="card__err">Not training right now{t.phase ? ` — phase: ${t.phase}` : ''}.</p>
+      ) : <p className="card__err">Unsloth Studio unreachable: {t.err || 'no response'}</p>}
+      <Fresh ts={t.ts} err={reach ? null : t.err} staleAfter={stale} />
     </Panel>
   )
 }

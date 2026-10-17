@@ -12,7 +12,7 @@ const save = (m: Msg[]) => { try { localStorage.setItem(K_HIST, JSON.stringify(m
 
 export function Chat({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { config, chat, reloadChat } = useDash()
-  const name = config?.chat.name || 'Jarvis'
+  const name = config?.chat.name || 'Juno'
   const [msgs, setMsgs] = useState<Msg[]>(load)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
