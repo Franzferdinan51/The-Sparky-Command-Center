@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Agency Command Center v2
-========================
-A read-only command center for a self-hosted AI fleet: GPU nodes (discrete cards or
-unified-memory boxes like the DGX Spark), an optional RoCE fabric switch, the model
-servers running on them (vLLM, SGLang, llama.cpp), ComfyUI render lanes, cumulative
-token usage, and a built-in chat assistant that talks to ANY OpenAI-compatible
+Juno Command Center (fork of The Sparky Command Center v2)
+==========================================================
+A read-only command center for Duckets' self-hosted AI fleet: GPU nodes (discrete
+cards, unified-memory boxes like the DGX Spark, Apple Silicon Macs fed by the
+Mac Studio Dashboard bridge, and Windows hosts over SSH), an optional RoCE fabric
+switch, the model servers running on them (vLLM, SGLang, llama.cpp, LM Studio),
+ComfyUI render lanes, live Unsloth training status, cumulative token usage, and a
+built-in chat assistant ("Juno") that talks to ANY OpenAI-compatible
 /v1/chat/completions endpoint (a local model, or an agent that exposes that API).
 
 Everything site-specific lives in config.json (gitignored). See config.example.json
@@ -33,7 +35,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "2.0.0"
+VERSION = "2.1.0-juno"
 
 
 # ----------------------------------------------------------------------------
@@ -71,9 +73,10 @@ DEFAULTS = {
     "eco": {"enabled": False, "allow_writes": False, "levels": [], "info_url": ""},
     "stations": {"enabled": False, "items": []},
     "keylights": {"enabled": False, "url": ""},
+    "training": {"enabled": False, "url": "", "label": "Training", "poll_seconds": 10},
     "chat": {
         "enabled": True,
-        "name": "Jarvis",
+        "name": "Juno",
         "base_url": "",
         "model": "",
         "api_key": "",
@@ -185,6 +188,7 @@ STATE = {
     "switch": {"reachable": False, "ts": 0, "err": "warming up"},
     "models": {},
     "comfy": {},
+    "training": {},
 }
 _hist = {}
 
@@ -431,12 +435,153 @@ def poll_discrete(node):
     return res
 
 
+# ----------------------------------------------------------------------------
+# Profile "apple": an Apple Silicon Mac. Vitals come from the Mac Studio
+# Dashboard bridge (~/workspace/dashboard/bridge, port 8901: chip, CPU, RAM,
+# swap, disks, thermal); GPU utilization + unified memory in use come from
+# IOAccelerator performance statistics via ioreg. The result is shaped like a
+# "unified" node so every existing card, aggregate and the fleet scene work
+# unchanged; the extra fields (chip/cpu/swap/disks/thermal) ride along for the
+# richer Apple card in the UI.
+# ----------------------------------------------------------------------------
+_APPLE_GPU_SCRIPT = (
+    "ioreg -r -d 1 -w 0 -c IOAccelerator 2>/dev/null | "
+    "sed -n 's/.*\"PerformanceStatistics\" = {\\(.*\\)}.*/\\1/p' | head -1"
+)
+
+
+def _apple_gpu_stats(node):
+    argv = ["/bin/sh", "-c", _APPLE_GPU_SCRIPT] if node.get("local") else remote_argv(node, _APPLE_GPU_SCRIPT)
+    rc, out, _err = _run(argv, timeout=10)
+    stats = {}
+    if rc == 0 and out:
+        for kv in out.strip().split(","):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                stats[k.strip().strip('"')] = v.strip().strip('"')
+    return stats
+
+
+def poll_apple(node):
+    res = {"key": node["key"], "name": node.get("name", node["key"]), "profile": "unified",
+           "kind": "apple", "node_id": node.get("node_id"), "rank": node.get("rank"),
+           "reachable": False, "temp": None, "power": None, "util": None, "sm_clock": None,
+           "mem_total_gib": None, "mem_used_gib": None, "mem_pct": None, "model_gib": None,
+           "model": node.get("serving"), "pair": node.get("pair"),
+           "ts": time.time(), "err": None, "chip": None, "cpu_pct": None,
+           "load_avg": None, "thermal": None, "uptime_s": None,
+           "swap_used_mb": None, "swap_total_mb": None, "disks": []}
+    url = (node.get("bridge_url") or "http://127.0.0.1:8901/api/system").rstrip("/")
+    ok, body = _http_get(url, timeout=6)
+    if not ok:
+        res["err"] = "dashboard bridge unreachable"
+        return res
+    try:
+        sysd = (json.loads(body) or {}).get("system") or {}
+        mem = sysd.get("memory") or {}
+        tot = mem.get("total_bytes") or 0
+        used = mem.get("used_bytes") or 0
+        if tot:
+            res["mem_total_gib"] = round(tot / 1073741824.0, 1)
+            res["mem_used_gib"] = round(used / 1073741824.0, 1)
+            res["mem_pct"] = round(used / tot * 100.0, 1)
+        sw = mem.get("swap") or {}
+        res["swap_total_mb"] = sw.get("total_mb")
+        res["swap_used_mb"] = sw.get("used_mb")
+        res["chip"] = sysd.get("chip")
+        res["cpu_pct"] = (sysd.get("cpu") or {}).get("used_pct")
+        res["load_avg"] = sysd.get("load_avg")
+        res["thermal"] = (sysd.get("thermal") or {}).get("state")
+        res["uptime_s"] = sysd.get("uptime_seconds")
+        for dk in sysd.get("disks") or []:
+            res["disks"].append({"label": dk.get("label"), "used_pct": dk.get("used_pct"),
+                                 "free_gib": round((dk.get("free_bytes") or 0) / 1073741824.0, 1)})
+        res["reachable"] = True
+    except Exception as e:  # noqa
+        res["err"] = ("parse: %s" % e)[:140]
+        return res
+    stats = _apple_gpu_stats(node)
+    util = _num(stats.get("Device Utilization %"))
+    if util is not None:
+        res["util"] = util
+    inuse = _num(stats.get("In use system memory"))
+    if inuse is not None:
+        res["model_gib"] = round(inuse / 1073741824.0, 1)
+    return res
+
+
+# ----------------------------------------------------------------------------
+# Profile "windows": a Windows host with discrete NVIDIA GPU(s), reached over
+# OpenSSH. nvidia-smi runs identically under cmd/PowerShell, so the GPU query
+# needs no shell on the node; host RAM is a best-effort PowerShell CIM read
+# (parsed only when it answers cleanly). Result is "discrete"-shaped.
+# ----------------------------------------------------------------------------
+_WIN_GPU_Q = ("nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,power.limit,"
+              "utilization.gpu,memory.used,memory.total,fan.speed,clocks.gr,clocks.mem "
+              "--format=csv,noheader,nounits")
+_WIN_MEM_Q = ("powershell -NoProfile -Command \"$os=Get-CimInstance Win32_OperatingSystem;"
+              "Write-Output ($os.TotalVisibleMemorySize.ToString()+' '+"
+              "($os.TotalVisibleMemorySize-$os.FreePhysicalMemory).ToString())\"")
+
+
+def poll_windows(node):
+    res = {"key": node["key"], "name": node.get("name", node["key"]), "profile": "discrete",
+           "kind": "windows", "host_label": node.get("badge") or "WINDOWS · GPU HOST",
+           "reachable": False, "ts": time.time(), "err": None,
+           "gpus": [], "cpu_temp": None, "cpu_temps": [],
+           "mem_total_mb": None, "mem_used_mb": None, "mem_pct": None, "models": []}
+    rc, out, err = _run(remote_argv(node, _WIN_GPU_Q), timeout=14)
+    if rc != 0 or not out.strip():
+        res["err"] = (err or "no output").strip()[:140]
+        return res
+    try:
+        for line in out.strip().splitlines():
+            f = [x.strip() for x in line.split(",")]
+            if len(f) < 11:
+                continue
+            fan = _num(f[8]) if f[8].replace(".", "").isdigit() else None
+            g = {"index": int(f[0]), "name": f[1].replace("NVIDIA GeForce ", ""),
+                 "temp": _num(f[2]), "power": _num(f[3]), "power_limit": _num(f[4]),
+                 "util": _num(f[5]), "mem_used_mb": _num(f[6]), "mem_total_mb": _num(f[7]),
+                 "fan": fan, "gr_clock": _num(f[9]), "mem_clock": _num(f[10])}
+            if g["mem_total_mb"]:
+                g["mem_pct"] = round((g["mem_used_mb"] or 0) / g["mem_total_mb"] * 100.0, 1)
+            res["gpus"].append(g)
+        res["reachable"] = len(res["gpus"]) > 0
+        if not res["reachable"]:
+            res["err"] = "no GPUs reported"
+            return res
+    except Exception as e:  # noqa
+        res["err"] = ("parse: %s" % e)[:140]
+        return res
+    rc2, out2, _e2 = _run(remote_argv(node, _WIN_MEM_Q), timeout=14)
+    if rc2 == 0 and out2.strip():
+        try:
+            parts = out2.strip().splitlines()[-1].split()
+            tot_kb, used_kb = float(parts[0]), float(parts[1])
+            if tot_kb:
+                res["mem_total_mb"] = round(tot_kb / 1024.0)
+                res["mem_used_mb"] = round(used_kb / 1024.0)
+                res["mem_pct"] = round(used_kb / tot_kb * 100.0, 1)
+        except Exception:  # noqa
+            pass
+    return res
+
+
 def _node_loop(node, offset):
     time.sleep(offset)
     interval = float(node.get("poll_interval") or CFG["defaults"]["poll_interval"])
     while True:
         try:
-            r = poll_unified(node) if node.get("profile") == "unified" else poll_discrete(node)
+            _prof = node.get("profile")
+            if _prof == "unified":
+                r = poll_unified(node)
+            elif _prof == "apple":
+                r = poll_apple(node)
+            elif _prof == "windows":
+                r = poll_windows(node)
+            else:
+                r = poll_discrete(node)
         except Exception as e:  # noqa
             r = {"key": node["key"], "name": node.get("name"), "profile": node.get("profile"),
                  "reachable": False, "ts": time.time(), "err": str(e)[:140], "gpus": []}
@@ -446,6 +591,7 @@ def _node_loop(node, offset):
                 if r.get("profile") == "unified":
                     _push_hist("spark:%s:temp" % node["key"], r.get("temp"))
                     _push_hist("spark:%s:power" % node["key"], r.get("power"))
+                    _push_hist("spark:%s:util" % node["key"], r.get("util"))
                 else:
                     for g in r.get("gpus") or []:
                         _push_hist("gpu:%s:%s:temp" % (node["key"], g["index"]), g.get("temp"))
@@ -607,7 +753,38 @@ def _auth_headers(m):
     return {"Authorization": "Bearer " + k} if k else None
 
 
+def poll_lmstudio(m):
+    """LM Studio has no Prometheus /metrics; its native /api/v0/models lists the
+    library with per-model state, which is what the card needs: server up/down,
+    what is loaded right now, and the loaded model's context length."""
+    res = _model_base(m)
+    res.update({"reachable": False, "engine": "LM Studio", "model": None, "decode_tps": None,
+                "prefill_tps": None, "ttft_ms": None, "kv_pct": None, "running": None,
+                "waiting": None, "ts": time.time(), "err": None, "loaded": [], "context": None})
+    url = m["endpoint"].rstrip("/")
+    ok, body = _http_get(url + "/api/v0/models", timeout=6, headers=_auth_headers(m))
+    if not ok:
+        res["err"] = "LM Studio down"
+        return res
+    try:
+        data = json.loads(body).get("data") or []
+    except Exception:  # noqa
+        res["err"] = "LM Studio: bad /api/v0/models"
+        return res
+    res["reachable"] = True
+    loaded = [d for d in data if d.get("state") == "loaded" and d.get("id")]
+    res["loaded"] = [d["id"] for d in loaded]
+    if loaded:
+        res["model"] = loaded[0]["id"]
+        res["context"] = loaded[0].get("max_context_length")
+    else:
+        res["err"] = "nothing loaded"
+    return res
+
+
 def poll_model(m):
+    if m.get("kind") == "lmstudio":
+        return poll_lmstudio(m)
     res = _model_base(m)
     res.update({"reachable": False, "engine": None, "model": None, "decode_tps": None,
                 "prefill_tps": None, "ttft_ms": None, "kv_pct": None, "running": None,
@@ -890,6 +1067,58 @@ def read_tokens():
 
 
 # ----------------------------------------------------------------------------
+# Unsloth Studio training status (the board's Training card + chat grounding).
+# Reads the Studio backend's /api/train/status: phase, step/total, epoch, loss.
+# ----------------------------------------------------------------------------
+TRAINING = CFG.get("training") or {}
+
+
+def poll_training():
+    res = {"enabled": True, "reachable": False, "running": False, "ts": time.time(),
+           "err": None, "label": TRAINING.get("label") or "Training", "phase": None,
+           "job_id": None, "message": None, "step": None, "total_steps": None,
+           "pct": None, "epoch": None, "loss": None, "learning_rate": None}
+    url = (TRAINING.get("url") or "").rstrip("/")
+    if not url:
+        res["err"] = "no url configured"
+        return res
+    ok, body = _http_get(url, timeout=6)
+    if not ok:
+        res["err"] = "studio unreachable"
+        return res
+    try:
+        d = json.loads(body)
+        det = d.get("details") or {}
+        res["reachable"] = True
+        res["running"] = bool(d.get("is_training_running"))
+        res["phase"] = d.get("phase")
+        res["job_id"] = d.get("job_id")
+        res["message"] = d.get("message")
+        res["step"] = det.get("step")
+        res["total_steps"] = det.get("total_steps")
+        res["epoch"] = det.get("epoch")
+        res["loss"] = det.get("loss")
+        res["learning_rate"] = det.get("learning_rate")
+        if res["step"] is not None and res["total_steps"]:
+            res["pct"] = round(res["step"] / res["total_steps"] * 100.0, 1)
+    except Exception as e:  # noqa
+        res["err"] = ("parse: %s" % e)[:140]
+    return res
+
+
+def _training_loop():
+    while True:
+        try:
+            r = poll_training()
+        except Exception as e:  # noqa
+            r = {"enabled": True, "reachable": False, "running": False,
+                 "ts": time.time(), "err": str(e)[:140]}
+        with _lock:
+            STATE["training"] = r
+        time.sleep(float(TRAINING.get("poll_seconds") or 10))
+
+
+# ----------------------------------------------------------------------------
 # Snapshot (shape kept compatible with the v1 /api/metrics for API consumers)
 # ----------------------------------------------------------------------------
 def start_pollers():
@@ -909,6 +1138,8 @@ def start_pollers():
         threading.Thread(target=_model_loop, args=(m, i * 0.7), daemon=True).start()
     if TOK.get("enabled", True) and TOK.get("mode", "bank") == "bank" and _token_models():
         threading.Thread(target=_tok_loop, daemon=True).start()
+    if TRAINING.get("enabled"):
+        threading.Thread(target=_training_loop, daemon=True).start()
 
 
 def snapshot():
@@ -917,6 +1148,7 @@ def snapshot():
         switch = dict(STATE["switch"]) if SWITCH else None
         hist = {k: list(v) for k, v in _hist.items()}
         models = [dict(STATE["models"][m["key"]]) for m in MODELS if m["key"] in STATE["models"]]
+        training = dict(STATE.get("training") or {})
     sd = CFG["defaults"]
     unified = [x for x in nodes if x.get("profile") == "unified"]
     discrete = [x for x in nodes if x.get("profile") != "unified"]
@@ -964,6 +1196,7 @@ def snapshot():
         "history": hist,
         "glm_model": next((n.get("serving") for n in NODES if n.get("serving")), None),
         "models": models,
+        "training": training,
         "spark_models": by_unit("spark"),
         "box_models": by_unit("box"),
         "ds4_models": by_unit("ds4"),
@@ -1093,7 +1326,13 @@ def fleet_context():
             lines.append("- NODE %s: UNREACHABLE (%s), last good poll %ss ago."
                          % (n["name"], n.get("err") or "no response", _age(n.get("ts"))))
             continue
-        if n.get("profile") == "unified":
+        if n.get("kind") == "apple":
+            lines.append("- NODE %s (Apple Silicon, %s): GPU util %s%%, CPU %s%%, unified memory %s/%s GiB (%s%%), GPU memory in use %s GiB, swap %s/%s MB, thermal %s."
+                         % (n["name"], n.get("chip") or "Apple Silicon", n.get("util"), n.get("cpu_pct"),
+                            n.get("mem_used_gib"), n.get("mem_total_gib"), n.get("mem_pct"),
+                            n.get("model_gib"), n.get("swap_used_mb"), n.get("swap_total_mb"),
+                            n.get("thermal") or "unknown"))
+        elif n.get("profile") == "unified":
             lines.append("- NODE %s (unified-memory GPU%s): %s C, %s W, util %s%%, SM %s MHz, memory %s/%s GiB (%s%%), model resident %s GiB, serving %s%s."
                          % (n["name"], ", " + n["node_id"] if n.get("node_id") else "",
                             n.get("temp"), n.get("power"), n.get("util"), n.get("sm_clock"),
@@ -1149,6 +1388,17 @@ def fleet_context():
                          % (v.get("name", k), _fmt_tok(v.get("total_tokens")), _fmt_tok(v.get("total_prompt")),
                             _fmt_tok(v.get("total_gen")), _fmt_tok(v.get("today_tokens")),
                             "live" if v.get("reachable") else "offline"))
+    tr = s.get("training") or {}
+    if tr.get("enabled"):
+        if not tr.get("reachable"):
+            lines.append("- TRAINING (%s): Studio unreachable (%s)." % (tr.get("label") or "Training", tr.get("err") or "no response"))
+        elif tr.get("running"):
+            lines.append("- TRAINING (%s): RUNNING, step %s of %s (%s%%), epoch %s, loss %s, lr %s. %s"
+                         % (tr.get("label") or "Training", tr.get("step"), tr.get("total_steps"),
+                            tr.get("pct"), tr.get("epoch"), tr.get("loss"), tr.get("learning_rate"),
+                            tr.get("message") or ""))
+        else:
+            lines.append("- TRAINING (%s): not running (phase: %s)." % (tr.get("label") or "Training", tr.get("phase") or "idle"))
     stations = stations_snapshot()
     for st in stations:
         lines.append("- STATION %s: %s." % (st["name"], "up" if st["up"] else "DOWN"))
@@ -1190,7 +1440,7 @@ def _fmt_tok(n):
 
 
 def build_system_prompt():
-    name = CHAT.get("name") or "Jarvis"
+    name = CHAT.get("name") or "Juno"
     title = CFG["server"].get("title") or "Command Center"
     now = _now_local()
     persona = CHAT.get("system_prompt") or (
@@ -1339,9 +1589,11 @@ def public_config():
                 "nodes": [{"key": n["key"], "name": n.get("name", n["key"])} for n in NODES if n.get("profile") == "unified"],
                 "info_url": CFG["eco"].get("info_url") or ""},
         "stations": {"enabled": bool(CFG["stations"].get("enabled"))},
+        "training": {"enabled": bool(TRAINING.get("enabled")),
+                     "label": TRAINING.get("label") or "Training"},
         "keylights": {"enabled": bool(CFG["keylights"].get("enabled")),
                       "writes": bool(CFG["keylights"].get("allow_writes")) and not READ_ONLY},
-        "chat": {"enabled": bool(CHAT.get("enabled", True)), "name": CHAT.get("name") or "Jarvis",
+        "chat": {"enabled": bool(CHAT.get("enabled", True)), "name": CHAT.get("name") or "Juno",
                  "suggestions": CHAT.get("suggestions") or []},
     }
 
