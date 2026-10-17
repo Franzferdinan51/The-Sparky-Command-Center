@@ -38,7 +38,7 @@ export interface UiConfig {
   version: string; title: string; subtitle?: string; location?: string; timezone: string | null
   refresh_ms: number; read_only: boolean
   sections: SectionCfg[]
-  nodes: { key: string; name: string; profile: 'unified' | 'discrete'; badge?: string; temp_warn?: number; temp_hot?: number }[]
+  nodes: { key: string; name: string; profile: 'unified' | 'discrete' | 'apple' | 'windows'; badge?: string; temp_warn?: number; temp_hot?: number }[]
   switch: { name: string; badge: string; temp_warn: number; temp_hot: number } | null
   models: { key: string; unit: string; node?: string }[]
   comfy: { enabled: boolean; title: string }
@@ -46,6 +46,7 @@ export interface UiConfig {
   eco: { enabled: boolean; writes: boolean; levels: EcoLevel[]; nodes: { key: string; name: string }[]; info_url: string }
   stations: { enabled: boolean }
   keylights: { enabled: boolean; writes: boolean }
+  training: { enabled: boolean; label: string }
   chat: { enabled: boolean; name: string; suggestions: string[] }
 }
 
@@ -56,13 +57,17 @@ export interface UnifiedNode {
   temp: number | null; power: number | null; util: number | null; sm_clock: number | null
   mem_total_gib: number | null; mem_used_gib: number | null; mem_pct: number | null; model_gib: number | null
   model?: string | null; pair?: string | null; ts: number; err: string | null
+  kind?: string; chip?: string | null; cpu_pct?: number | null; load_avg?: number[] | null
+  thermal?: string | null; uptime_s?: number | null
+  swap_used_mb?: number | null; swap_total_mb?: number | null
+  disks?: { label?: string; used_pct?: number; free_gib?: number }[]
 }
 export interface Gpu {
   index: number; name: string; temp: number | null; power: number | null; power_limit: number | null; util: number | null
   mem_used_mb: number | null; mem_total_mb: number | null; mem_pct?: number; fan: number | null; gr_clock: number | null; mem_clock: number | null
 }
 export interface DiscreteNode {
-  key: string; name: string; profile: 'discrete'; host_label?: string; reachable: boolean; ts: number; err: string | null
+  key: string; name: string; profile: 'discrete'; kind?: string; host_label?: string; reachable: boolean; ts: number; err: string | null
   gpus: Gpu[]; cpu_temp: number | null; cpu_temps: number[]; mem_total_mb: number | null; mem_used_mb: number | null; mem_pct: number | null
   models: { name: string; label: string; port?: number; gpus?: string; up: boolean }[]
 }
@@ -77,10 +82,18 @@ export interface ModelState {
   reachable: boolean; engine?: string | null; model?: string | null
   decode_tps?: number | null; prefill_tps?: number | null; ttft_ms?: number | null; kv_pct?: number | null
   running?: number | null; waiting?: number | null; ts: number; err: string | null
+  loaded?: string[]; context?: number | null
+}
+export interface TrainingState {
+  enabled?: boolean; reachable: boolean; running: boolean; ts: number; err: string | null
+  label?: string; phase?: string | null; job_id?: string | null; message?: string | null
+  step?: number | null; total_steps?: number | null; pct?: number | null
+  epoch?: number | null; loss?: number | null; learning_rate?: number | null
 }
 export interface Metrics {
   ts: number; version: string; read_only: boolean
   nodes: FleetNode[]; switch: SwitchState; history: Record<string, number[]>; models: ModelState[]
+  training?: TrainingState
   agg: { gpu_count: number; total_power: number; hottest_unit: string | null; hottest_temp: number | null; all_ok: boolean; down: string[] }
   thresholds: { temp_warn: number; temp_hot: number; stale_after_s: number }
 }

@@ -36,7 +36,7 @@ export function Nav({ onAsk }: { onAsk: () => void }) {
   const down = metrics?.agg.down || []
   const ok = !!metrics && !metricsError && metrics.agg.all_ok
   const short = (config?.title || 'Command Center').replace(/\s*command center$/i, '')
-  const chatName = config?.chat.name || 'Jarvis'
+  const chatName = config?.chat.name || 'Juno'
 
   return (
     <>

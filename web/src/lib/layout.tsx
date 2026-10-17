@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 
 const K_ORDER = 'acc2.modOrder', K_COLLAPSED = 'acc2.modCollapsed', K_THEME = 'acc2.theme'
 export const THEMES = [
+  { key: 'duck', label: 'Duck', swatch: ['#ffb547', '#060d18'] },
   { key: 'core', label: 'Core', swatch: ['#5fe3ff', '#060709'] },
   { key: 'sunset', label: 'Sunset', swatch: ['#ff7a1a', '#120c08'] },
   { key: 'breeze', label: 'Breeze', swatch: ['#38bdf8', '#0b1220'] },
@@ -36,8 +37,8 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(read<string[]>(K_COLLAPSED, [])))
   const [rearranging, setRearranging] = useState(false)
   const [theme, setThemeState] = useState<ThemeKey>(() => {
-    const t = read<string>(K_THEME, 'core')
-    return (THEMES.some(x => x.key === t) ? t : 'core') as ThemeKey
+    const t = read<string>(K_THEME, 'duck')
+    return (THEMES.some(x => x.key === t) ? t : 'duck') as ThemeKey
   })
 
   useEffect(() => {

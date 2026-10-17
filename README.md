@@ -1,24 +1,28 @@
-# Command Center v2
+# Juno Command Center
 
-A read-only command center for a self-hosted AI fleet, with a live Three.js constellation of your machines and a built-in chat assistant that runs on **your own model**.
+A read-only command center for Duckets' self-hosted AI fleet, with a live Three.js constellation of your machines and a built-in chat assistant that runs on **your own model**. Forked from [tonyd2wild/The-Sparky-Command-Center](https://github.com/tonyd2wild/The-Sparky-Command-Center) and converted for this fleet: Apple Silicon + Windows nodes, LM Studio serving, live Unsloth training status, and a Duck theme in the Mac Studio Dashboard's deep-navy glass.
 
 It watches:
 
 - **GPU nodes** over SSH: unified-memory boxes (DGX Spark / GB10 class) and hosts with discrete GPUs (RTX, A-series). Temperature, power, utilization, clocks, memory, fans, CPU temperature, running containers, and a temperature sparkline per GPU.
+- **Apple Silicon Macs** (profile `apple`): vitals from the Mac Studio Dashboard bridge (chip, CPU, RAM, swap, disks, thermal) plus GPU utilization and unified-memory-in-use from IOAccelerator — no nvidia-smi required.
+- **Windows hosts** (profile `windows`): discrete NVIDIA GPUs over OpenSSH with plain `nvidia-smi` (no shell tooling needed on the node), plus host RAM via CIM.
+- **LM Studio** model servers (model `kind: "lmstudio"`): up/down, what's loaded right now, and context length, from the native `/api/v0/models` API (LM Studio has no Prometheus `/metrics`).
+- **Unsloth training**: live step / total, epoch, loss and learning rate from the Studio backend's `/api/train/status`, as a board card and in the chat's grounding.
 - **A fabric switch** (MikroTik RouterOS): temperatures, fans, PSUs, uptime, and live throughput per port.
 - **Model servers** (vLLM, SGLang, llama.cpp) through their Prometheus `/metrics`: decode and prefill tok/s, TTFT, KV-cache use, running and waiting requests, and the live model id.
 - **ComfyUI render lanes**: up/idle/rendering, queue depth, and memory, taken from the driver (not ComfyUI's own estimate), with peak-while-rendering marks.
 - **Tokens served** per model, banked across server restarts, with a per-day count.
 - Optional extras: GPU clock caps (status plus, if you allow it, apply), links to other web apps on the host with an up/down probe, and Elgato key lights.
 
-The chat ("Jarvis" by default) sees the same live data the board shows, so you can ask *"what is down right now?"* or *"which node is running hottest?"* and get an answer grounded in the current numbers.
+The chat ("Juno" here; the name is a config field) sees the same live data the board shows, so you can ask *"what is down right now?"* or *"which node is running hottest?"* and get an answer grounded in the current numbers.
 
 Stack: Python 3.9+ standard library for the server (no pip installs), Vite + React + TypeScript + React Three Fiber + GSAP + Lenis for the UI.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/tonyd2wild/The-Sparky-Command-Center.git && cd The-Sparky-Command-Center
+git clone https://github.com/Franzferdinan51/The-Sparky-Command-Center.git && cd The-Sparky-Command-Center
 cp config.example.json config.json      # then edit it for your machines
 python3 server.py
 # open http://localhost:8895

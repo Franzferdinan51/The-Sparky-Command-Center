@@ -55,7 +55,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const reloadChat = useCallback(async (force = false) => {
     const r = await getChatStatus(force)
     if (r.ok) setChat(r.data)
-    else setChat({ enabled: true, configured: false, reachable: false, name: 'Jarvis' })
+    else setChat({ enabled: true, configured: false, reachable: false, name: 'Juno' })
   }, [])
   useEffect(() => {
     reloadChat()
