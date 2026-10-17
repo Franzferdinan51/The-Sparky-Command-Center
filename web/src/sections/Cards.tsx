@@ -1,4 +1,4 @@
-import type { DiscreteNode, Gpu, ModelState, SwitchState, TrainingState, UnifiedNode } from '../lib/api'
+import type { AgentNode, DiscreteNode, Gpu, ModelState, SwitchState, TrainingState, UnifiedNode } from '../lib/api'
 import { fmtBps, fmtTps, fx, isNum, tempTone, tempWord } from '../lib/format'
 import { Bar, Big, Chip, Fresh, KV, Led, Panel, Pill, Sparkline } from '../components/Panel'
 
@@ -191,6 +191,34 @@ export function ModelCard({ m, stale }: { m: ModelState; stale: number }) {
         </>
       ) : <p className="card__err">{m.label} offline: {m.err || 'no /metrics'}</p>}
       <Fresh ts={m.ts} err={reach ? null : m.err} staleAfter={stale} />
+    </Panel>
+  )
+}
+
+export function AgentCard({ a, stale }: { a: AgentNode; stale: number }) {
+  const reach = a.reachable
+  const up = isNum(a.uptime_s) ? `${Math.floor(a.uptime_s / 86400)}d ${Math.floor((a.uptime_s % 86400) / 3600)}h ${Math.floor((a.uptime_s % 3600) / 60)}m` : '-'
+  return (
+    <Panel id={`card-node-${a.key}`} dim={!reach} tone={!reach ? 'bad' : undefined}
+      title={<><Led on={reach} /> <span>{a.name}</span></>}
+      chips={<>{a.host_label && <Chip tone="core">{a.host_label}</Chip>}{a.hostname && <Chip>{a.hostname}</Chip>}</>}>
+      {reach ? (
+        <>
+          <div className="bigrow">
+            <Big label="CPU" value={fx(a.cpu_pct, 1)} unit="%" />
+            <Big label="RAM" value={isNum(a.mem_used_mb) ? (a.mem_used_mb / 1024).toFixed(1) : '-'} unit={isNum(a.mem_total_mb) ? `/ ${(a.mem_total_mb / 1024).toFixed(0)} GiB` : ''} small />
+            <Big label="Jobs on" value={fx(a.jobs, 0)} small />
+          </div>
+          <KV k="Memory">{fx(a.mem_pct, 1)} % used</KV>
+          <Bar pct={a.mem_pct} />
+          <KV k="Disk">{isNum(a.disk_used_gb) && isNum(a.disk_total_gb) ? `${a.disk_used_gb.toFixed(0)} / ${a.disk_total_gb.toFixed(0)} GB` : '-'}</KV>
+          <Bar pct={a.disk_pct} />
+          {(a.load_avg && a.load_avg.length > 0) && <KV k="Load avg">{a.load_avg.map(v => v.toFixed(2)).join(' · ')}</KV>}
+          <KV k="Uptime">{up}</KV>
+          <KV k="Heartbeat">{isNum(a.age_s) ? `${a.age_s.toFixed(0)}s ago` : '-'}</KV>
+        </>
+      ) : <p className="card__err">Not reporting: {a.err || 'no stats'}</p>}
+      <Fresh ts={a.ts} err={reach ? null : a.err} staleAfter={stale} />
     </Panel>
   )
 }

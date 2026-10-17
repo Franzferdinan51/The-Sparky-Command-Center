@@ -4,7 +4,8 @@ import { useLayout } from '../lib/layout'
 import { Module } from '../components/Module'
 import { ThemeMenu } from '../components/ThemeMenu'
 import { Empty } from '../components/Panel'
-import { UnifiedCard, GpuCard, HostCard, SwitchCard, ModelCard, TrainingCard } from './Cards'
+import { UnifiedCard, GpuCard, HostCard, SwitchCard, ModelCard, TrainingCard, AgentCard } from './Cards'
+import { Settings } from './Settings'
 import { Video } from './Video'
 import { Tokens } from './Tokens'
 import { Eco } from './Eco'
@@ -42,6 +43,7 @@ export function Board() {
     }
     if (config.comfy.enabled) out.push({ id: 'video', eyebrow: 'Render lanes', title: config.comfy.title, tone: 'violet', render: () => <Video /> })
     if (config.stations.enabled || config.keylights.enabled) out.push({ id: 'stations', eyebrow: 'Web stations', title: 'Stations & lights', render: () => <Stations /> })
+    if (config.settings?.enabled) out.push({ id: 'settings', eyebrow: 'Configuration', title: 'Settings', subtitle: 'the board itself — brain model', render: () => <Settings /> })
     return out
   }, [config, subs.subs]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -100,6 +102,7 @@ function FleetSection({ s, subs, toggleSub }: { s: SectionCfg; subs: string[]; t
   const nodes = s.nodes.map(k => metrics.nodes.find(n => n.key === k)).filter(Boolean) as typeof metrics.nodes
   const unified = nodes.filter(n => n.profile === 'unified')
   const discrete = nodes.filter(n => n.profile === 'discrete')
+  const agents = nodes.filter(n => n.profile === 'agent')
   const models = metrics.models.filter(m => s.units.includes(m.unit))
   const nodeCfg = (k: string) => config.nodes.find(n => n.key === k)
   const subId = `${s.key}:models`
@@ -110,6 +113,13 @@ function FleetSection({ s, subs, toggleSub }: { s: SectionCfg; subs: string[]; t
         <div className="cards cards--4">
           {unified.map(n => n.profile === 'unified' && (
             <UnifiedCard key={n.key} s={n} hist={n.kind === 'apple' ? hist[`spark:${n.key}:util`] : hist[`spark:${n.key}:temp`]} warn={nodeCfg(n.key)?.temp_warn ?? th.temp_warn} hot={nodeCfg(n.key)?.temp_hot ?? th.temp_hot} stale={th.stale_after_s} />
+          ))}
+        </div>
+      )}
+      {agents.length > 0 && (
+        <div className="cards cards--4">
+          {agents.map(a => a.profile === 'agent' && (
+            <AgentCard key={a.key} a={a} stale={Math.max(th.stale_after_s, 90)} />
           ))}
         </div>
       )}

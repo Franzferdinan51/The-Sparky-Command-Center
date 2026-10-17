@@ -47,6 +47,7 @@ export interface UiConfig {
   stations: { enabled: boolean }
   keylights: { enabled: boolean; writes: boolean }
   training: { enabled: boolean; label: string }
+  settings: { enabled: boolean }
   chat: { enabled: boolean; name: string; suggestions: string[] }
 }
 
@@ -71,7 +72,14 @@ export interface DiscreteNode {
   gpus: Gpu[]; cpu_temp: number | null; cpu_temps: number[]; mem_total_mb: number | null; mem_used_mb: number | null; mem_pct: number | null
   models: { name: string; label: string; port?: number; gpus?: string; up: boolean }[]
 }
-export type FleetNode = UnifiedNode | DiscreteNode
+export interface AgentNode {
+  key: string; name: string; profile: 'agent'; kind?: string; host_label?: string
+  reachable: boolean; ts: number; err: string | null; age_s?: number | null
+  hostname?: string | null; uptime_s?: number | null; load_avg?: number[] | null; cpu_pct?: number | null
+  mem_total_mb?: number | null; mem_used_mb?: number | null; mem_pct?: number | null
+  disk_total_gb?: number | null; disk_used_gb?: number | null; disk_pct?: number | null; jobs?: number | null
+}
+export type FleetNode = UnifiedNode | DiscreteNode | AgentNode
 export interface SwitchPort { name: string; running: boolean; rx_bps: number; tx_bps: number; rate: string | null }
 export interface SwitchState {
   reachable: boolean; ts: number; err: string | null
@@ -113,6 +121,10 @@ export interface ChatStatus {
   enabled: boolean; configured: boolean; reachable: boolean; name: string
   model?: string; active_model?: string | null; fallback?: boolean; endpoints?: number
 }
+export interface SettingsData {
+  chat: { name?: string; model?: string; base_url?: string; temperature?: number }
+  lmstudio: { reachable: boolean; models: { id: string; state?: string; type?: string; max_context_length?: number | null }[] }
+}
 
 export const getConfig = () => getJSON<UiConfig>('/api/config')
 export const getMetrics = () => getJSON<Metrics>('/api/metrics')
@@ -122,3 +134,5 @@ export const getStations = () => getJSON<{ stations: Station[] }>('/api/stations
 export const getLights = () => getJSON<{ lights: Light[]; down?: boolean; disabled?: boolean }>('/api/lights')
 export const getEcoStatus = () => getJSON<{ status: Record<string, string>; disabled?: boolean }>('/api/eco-status', 40000)
 export const getChatStatus = (force = false) => getJSON<ChatStatus>(`/api/chat/status${force ? '?force=1' : ''}`)
+export const getSettings = () => getJSON<SettingsData>('/api/settings')
+export const postBrainModel = (model: string) => postJSON<{ ok: boolean; model?: string; persisted?: boolean; error?: string }>('/api/settings/chat', { model })

@@ -35,7 +35,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "2.1.0-juno"
+VERSION = "2.2.0-juno"
 
 
 # ----------------------------------------------------------------------------
@@ -472,7 +472,12 @@ def poll_apple(node):
            "load_avg": None, "thermal": None, "uptime_s": None,
            "swap_used_mb": None, "swap_total_mb": None, "disks": []}
     url = (node.get("bridge_url") or "http://127.0.0.1:8901/api/system").rstrip("/")
-    ok, body = _http_get(url, timeout=6)
+    ok, body = False, ""
+    for _attempt in range(2):  # the bridge collects subprocess stats; under load one slow answer must not flap the card
+        ok, body = _http_get(url, timeout=10)
+        if ok:
+            break
+        time.sleep(1)
     if not ok:
         res["err"] = "dashboard bridge unreachable"
         return res
@@ -568,6 +573,46 @@ def poll_windows(node):
     return res
 
 
+# ----------------------------------------------------------------------------
+# Profile "agent": Juno's own Muse VM. The VM has no inbound path from the
+# Mac, so a pusher service on the VM writes a stats JSON onto this host every
+# ~30s over the same SSH route Juno uses to reach the Mac; this poller reads
+# the file and judges liveness by its timestamp.
+# ----------------------------------------------------------------------------
+_AGENT_FIELDS = ("hostname", "uptime_s", "load_avg", "cpu_pct", "mem_total_mb",
+                 "mem_used_mb", "mem_pct", "disk_total_gb", "disk_used_gb",
+                 "disk_pct", "jobs")
+
+
+def poll_agent(node):
+    res = {"key": node["key"], "name": node.get("name", node["key"]), "profile": "agent",
+           "kind": "juno", "host_label": node.get("badge") or "AGENT",
+           "reachable": False, "ts": time.time(), "err": None, "age_s": None}
+    for k in _AGENT_FIELDS:
+        res[k] = None
+    path = _abs(node.get("stats_file") or "data/juno-stats.json")
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception:  # noqa
+        res["err"] = "no stats yet (pusher not reporting)"
+        return res
+    ts = float(d.get("ts") or 0)
+    age = time.time() - ts
+    res["age_s"] = round(age, 1)
+    res["ts"] = ts
+    for k in _AGENT_FIELDS:
+        res[k] = d.get(k)
+    if age > float(node.get("stale_after_s") or 240):
+        res["err"] = "stats stale (%.0fs old)" % age
+        return res
+    res["reachable"] = True
+    return res
+
+
+_fail_streak = {}
+
+
 def _node_loop(node, offset):
     time.sleep(offset)
     interval = float(node.get("poll_interval") or CFG["defaults"]["poll_interval"])
@@ -580,13 +625,30 @@ def _node_loop(node, offset):
                 r = poll_apple(node)
             elif _prof == "windows":
                 r = poll_windows(node)
+            elif _prof == "agent":
+                r = poll_agent(node)
             else:
                 r = poll_discrete(node)
         except Exception as e:  # noqa
             r = {"key": node["key"], "name": node.get("name"), "profile": node.get("profile"),
                  "reachable": False, "ts": time.time(), "err": str(e)[:140], "gpus": []}
         with _lock:
-            STATE["nodes"][node["key"]] = r
+            if not r.get("reachable"):
+                # One bad poll (a slow bridge answer, a dropped SSH packet) must not
+                # flap a card to UNREACHABLE: keep the last good reading for the
+                # first consecutive failure; only the second marks the node down.
+                _fail_streak[node["key"]] = _fail_streak.get(node["key"], 0) + 1
+                prev = STATE["nodes"].get(node["key"]) or {}
+                if _fail_streak[node["key"]] == 1 and prev.get("reachable"):
+                    kept = dict(prev)
+                    kept["err"] = r.get("err")
+                    STATE["nodes"][node["key"]] = kept
+                    r = kept
+                else:
+                    STATE["nodes"][node["key"]] = r
+            else:
+                _fail_streak[node["key"]] = 0
+                STATE["nodes"][node["key"]] = r
             if r.get("reachable"):
                 if r.get("profile") == "unified":
                     _push_hist("spark:%s:temp" % node["key"], r.get("temp"))
@@ -1294,6 +1356,31 @@ def chat_status(force=False):
     return out
 
 
+def _lmstudio_library():
+    """The LM Studio library (id/state/type) for the Settings brain picker."""
+    base = (CHAT.get("base_url") or "").rstrip("/")
+    origin = base[:-3] if base.endswith("/v1") else base
+    if not origin:
+        return {"reachable": False, "models": []}
+    ok, body = _http_get(origin + "/api/v0/models", timeout=6)
+    if not ok:
+        return {"reachable": False, "models": []}
+    try:
+        data = json.loads(body).get("data") or []
+    except Exception:  # noqa
+        return {"reachable": False, "models": []}
+    models = [{"id": d.get("id"), "state": d.get("state"), "type": d.get("type"),
+               "max_context_length": d.get("max_context_length")} for d in data if d.get("id")]
+    models.sort(key=lambda m: (m["state"] != "loaded", str(m["id"])))
+    return {"reachable": True, "models": models}
+
+
+def settings_payload():
+    return {"chat": {"name": CHAT.get("name"), "model": CHAT.get("model"),
+                     "base_url": CHAT.get("base_url"), "temperature": CHAT.get("temperature")},
+            "lmstudio": _lmstudio_library()}
+
+
 def _tz():
     name = CFG["server"].get("timezone") or ""
     try:
@@ -1326,7 +1413,12 @@ def fleet_context():
             lines.append("- NODE %s: UNREACHABLE (%s), last good poll %ss ago."
                          % (n["name"], n.get("err") or "no response", _age(n.get("ts"))))
             continue
-        if n.get("kind") == "apple":
+        if n.get("profile") == "agent":
+            lines.append("- AGENT %s (Juno's Muse VM, %s): CPU %s%%, RAM %s/%s MB (%s%%), disk %s%% used, load %s, %s scheduled jobs enabled, stats %ss old."
+                         % (n["name"], n.get("hostname") or "muse", n.get("cpu_pct"),
+                            n.get("mem_used_mb"), n.get("mem_total_mb"), n.get("mem_pct"),
+                            n.get("disk_pct"), n.get("load_avg"), n.get("jobs"), n.get("age_s")))
+        elif n.get("kind") == "apple":
             lines.append("- NODE %s (Apple Silicon, %s): GPU util %s%%, CPU %s%%, unified memory %s/%s GiB (%s%%), GPU memory in use %s GiB, swap %s/%s MB, thermal %s."
                          % (n["name"], n.get("chip") or "Apple Silicon", n.get("util"), n.get("cpu_pct"),
                             n.get("mem_used_gib"), n.get("mem_total_gib"), n.get("mem_pct"),
@@ -1591,6 +1683,7 @@ def public_config():
         "stations": {"enabled": bool(CFG["stations"].get("enabled"))},
         "training": {"enabled": bool(TRAINING.get("enabled")),
                      "label": TRAINING.get("label") or "Training"},
+        "settings": {"enabled": True},
         "keylights": {"enabled": bool(CFG["keylights"].get("enabled")),
                       "writes": bool(CFG["keylights"].get("allow_writes")) and not READ_ONLY},
         "chat": {"enabled": bool(CHAT.get("enabled", True)), "name": CHAT.get("name") or "Juno",
@@ -1685,6 +1778,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/chat/status":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             return self._json(chat_status(force=q.get("force", ["0"])[0] == "1"))
+        if path == "/api/settings":
+            return self._json(settings_payload())
         if path.startswith("/api/"):
             return self._json({"ok": False, "error": "not found"}, 404)
         return self._static(path)
@@ -1730,9 +1825,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "same-origin only (%s)" % why}, 403)
         if path == "/api/chat":
             return self._chat()
+        if path == "/api/settings/chat":
+            return self._settings_chat()
         if path in ("/api/eco-set", "/api/lights-set", "/api/ds4-move"):
             return self._write_route(path)
         return self._json({"ok": False, "error": "not found"}, 404)
+
+    def _settings_chat(self):
+        """Change the chat's brain model. This is board configuration, not an
+        action on any machine, so it is allowed in read-only mode (same as the
+        chat itself); the choice is persisted to config.json on this host."""
+        body = self._body() or {}
+        model = str(body.get("model") or "").strip()
+        if not model or len(model) > 200:
+            return self._json({"ok": False, "error": "bad model"}, 400)
+        CHAT["model"] = model
+        persisted = False
+        if CFG_PATH and os.path.exists(CFG_PATH):
+            try:
+                with open(CFG_PATH) as f:
+                    raw = json.load(f)
+                raw.setdefault("chat", {})["model"] = model
+                tmp = CFG_PATH + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(raw, f, indent=2, sort_keys=True)
+                os.replace(tmp, CFG_PATH)
+                persisted = True
+            except Exception as e:  # noqa
+                return self._json({"ok": False, "persisted": False,
+                                   "error": "brain set for this session but not saved: %s" % e}, 500)
+        _chat_probe.update(ts=0, data=None)
+        return self._json({"ok": True, "model": model, "persisted": persisted})
 
     def _write_route(self, path):
         """Every route that changes something on another machine. Refused in read-only mode."""
