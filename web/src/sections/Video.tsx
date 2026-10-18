@@ -19,14 +19,24 @@ export function Video() {
           <Panel key={l.key} id={`card-lane-${l.key}`} tone={dead ? 'bad' : l.busy ? 'violet' : undefined}
             title={<><Chip tone="core">LANE {l.lane}</Chip> <span>{l.name}</span></>}
             chips={<span className={`lanestate lanestate--${dead ? 'bad' : l.busy ? 'busy' : 'good'} mono`}>● {state}</span>}>
-            <div className="lane__v tnum">{fmtGB(l.vram_used)}<em>GB used {l.unified ? '· whole node' : '· this GPU'}</em></div>
-            <Bar pct={dead ? 0 : pct} tone={dead ? 'muted' : undefined} />
-            <div className="lane__meta mono"><span>{fmtGB(l.vram_free)} GB free of {fmtGB(l.vram_total)}</span><span>queue {q}</span></div>
+            {dead ? (
+              <>
+                <div className="lane__v tnum">-<em>no live reading while ComfyUI is down</em></div>
+                <Bar pct={0} tone="muted" />
+                <div className="lane__meta mono"><span>node memory {fmtGB(l.vram_total)} GB total</span><span>queue {q}</span></div>
+              </>
+            ) : (
+              <>
+                <div className="lane__v tnum">{fmtGB(l.vram_used)}<em>GB used {l.unified ? '· whole node' : '· this GPU'}</em></div>
+                <Bar pct={pct} />
+                <div className="lane__meta mono"><span>{fmtGB(l.vram_free)} GB free of {fmtGB(l.vram_total)}</span><span>queue {q}</span></div>
+              </>
+            )}
             <div className="lane__peaks mono">
               <span className="violet">peak while rendering <b>{l.peak_busy != null ? `${fmtGB(l.peak_busy)} GB` : '-'}</b></span>
               <span>peak any {fmtGB(l.peak_used)} GB</span>
             </div>
-            <p className="lane__src mono">via {l.mem_source || '?'}{l.unified ? ' (unified pool, whole node)' : ''}{l.comfy_used != null && l.mem_source !== 'comfyui' ? ` · ComfyUI self-reports ${fmtGB(l.comfy_used)} GB` : ''}</p>
+            {!dead && <p className="lane__src mono">via {l.mem_source || '?'}{l.unified ? ' (unified pool, whole node)' : ''}{l.comfy_used != null && l.mem_source !== 'comfyui' ? ` · ComfyUI self-reports ${fmtGB(l.comfy_used)} GB` : ''}</p>}
             <a className="lane__open mono" href={l.url} target="_blank" rel="noopener noreferrer">open ComfyUI <span className="lane__host">{l.url.replace(/^https?:\/\//, '')}</span> →</a>
             <p className="lane__src mono">{l.host}{l.version ? ` · v${l.version}` : ''}</p>
             <Fresh ts={l.ts || undefined} err={dead ? 'ComfyUI not answering' : null} />

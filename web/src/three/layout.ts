@@ -44,15 +44,13 @@ export function buildScene(cfg: UiConfig | null, m: Metrics | null, lanes: Comfy
   })
 
   const all = m?.nodes || []
-  const uni = all.filter(n => n.profile === 'unified')
-  const dis = all.filter(n => n.profile !== 'unified')
-  // Nodes that config knows about but metrics has not reported yet still get a place.
   const cfgNodes = cfg?.nodes || []
-  const uniKeys = cfgNodes.filter(n => n.profile === 'unified').map(n => n.key)
-  const disKeys = cfgNodes.filter(n => n.profile !== 'unified').map(n => n.key)
-
-  // All hosts share one ring (unified first, then discrete) so the constellation stays compact.
-  const ringKeys = [...uniKeys, ...disKeys]
+  // All hosts share one ring, in config order, so the constellation stays compact.
+  // Status comes from each node's OWN reachable flag and its own shape — the config
+  // profile strings ('apple', 'windows', 'agent') name pollers, not scene shapes, and
+  // must not be mistaken for them (that mismatch once stamped the Mac and the agent
+  // 'unreachable' in the scene while their cards were live).
+  const ringKeys = cfgNodes.map(n => n.key)
   const slot = (key: string): [number, number, number] => {
     const i = ringKeys.indexOf(key)
     const a = (i / Math.max(1, ringKeys.length)) * Math.PI * 2 + Math.PI / 5
@@ -60,38 +58,41 @@ export function buildScene(cfg: UiConfig | null, m: Metrics | null, lanes: Comfy
     return [Math.cos(a) * r, (i % 2 ? 0.22 : -0.16), Math.sin(a) * r * 0.9]
   }
 
-  uniKeys.forEach((key) => {
-    const n = uni.find(x => x.key === key) as (typeof uni)[number] | undefined
-    const temp = n && n.profile === 'unified' ? n.temp : null
-    const status: Status = !n || !n.reachable ? 'bad' : isNum(temp) && temp >= warn ? (temp >= hot ? 'bad' : 'warn') : 'ok'
-    const util = n && n.profile === 'unified' && isNum(n.util) ? n.util / 100 : 0
-    nodes.push({
-      id: `node-${key}`, kind: 'unified', label: (cfgNodes.find(c => c.key === key)?.name || key),
-      sub: n?.reachable && n.profile === 'unified' ? `${isNum(n.temp) ? n.temp.toFixed(0) : '-'}°C · ${isNum(n.power) ? n.power.toFixed(0) : '-'} W` : 'unreachable',
-      status, activity: clamp01(0.12 + util), base: slot(key),
-    })
-    links.push({ a: `node-${key}`, b: hubId, status: status === 'bad' ? 'bad' : 'ok', activity: Math.max(fabricAct, util) })
-  })
-
-  disKeys.forEach((key) => {
-    const n = dis.find(x => x.key === key)
+  cfgNodes.forEach((c) => {
+    const key = c.key
+    const n = all.find(x => x.key === key)
     let status: Status = 'bad'
     let sub = 'unreachable'
     let act = 0.1
-    if (n && n.profile === 'discrete' && n.reachable) {
-      const temps = n.gpus.map(g => g.temp).filter(isNum)
-      const top = temps.length ? Math.max(...temps) : null
-      status = isNum(top) && top >= warn ? (top >= hot ? 'bad' : 'warn') : 'ok'
-      const pw = n.gpus.reduce((s, g) => s + (g.power || 0), 0)
-      sub = `${n.gpus.length} GPU · ${pw.toFixed(0)} W`
-      const u = n.gpus.map(g => g.util || 0)
-      act = clamp01(0.1 + (u.length ? u.reduce((s, v) => s + v, 0) / u.length / 100 : 0))
+    let kind: Kind = 'discrete'
+    if (n && n.reachable) {
+      if (n.profile === 'agent') {
+        sub = `AGENT · CPU ${isNum(n.cpu_pct) ? n.cpu_pct.toFixed(0) : '-'}% · ${isNum(n.jobs) ? n.jobs : '-'} JOBS`
+        status = 'ok'
+        act = clamp01(0.1 + (isNum(n.cpu_pct) ? n.cpu_pct / 100 : 0))
+      } else if (n.profile === 'unified' && n.kind === 'apple') {
+        kind = 'unified'
+        sub = `GPU ${isNum(n.util) ? n.util.toFixed(0) : '-'}% · ${isNum(n.model_gib) ? n.model_gib.toFixed(1) : '-'} GIB`
+        status = 'ok'
+        act = clamp01(0.12 + (isNum(n.util) ? n.util / 100 : 0))
+      } else if (n.profile === 'unified') {
+        kind = 'unified'
+        const temp = n.temp
+        status = isNum(temp) && temp >= warn ? (temp >= hot ? 'bad' : 'warn') : 'ok'
+        sub = `${isNum(n.temp) ? n.temp.toFixed(0) : '-'}°C · ${isNum(n.power) ? n.power.toFixed(0) : '-'} W`
+        act = clamp01(0.12 + (isNum(n.util) ? n.util / 100 : 0))
+      } else if (n.profile === 'discrete') {
+        const temps = n.gpus.map(g => g.temp).filter(isNum)
+        const top = temps.length ? Math.max(...temps) : null
+        status = isNum(top) && top >= warn ? (top >= hot ? 'bad' : 'warn') : 'ok'
+        const pw = n.gpus.reduce((s, g) => s + (g.power || 0), 0)
+        sub = `${n.gpus.length} GPU · ${pw.toFixed(0)} W`
+        const u = n.gpus.map(g => g.util || 0)
+        act = clamp01(0.1 + (u.length ? u.reduce((s, v) => s + v, 0) / u.length / 100 : 0))
+      }
     }
-    nodes.push({
-      id: `node-${key}`, kind: 'discrete', label: cfgNodes.find(c => c.key === key)?.name || key, sub, status, activity: act,
-      base: slot(key),
-    })
-    links.push({ a: `node-${key}`, b: hubId, status: status === 'bad' ? 'bad' : 'ok', activity: act })
+    nodes.push({ id: `node-${key}`, kind, label: c.name || key, sub, status, activity: act, base: slot(key) })
+    links.push({ a: `node-${key}`, b: hubId, status: status === 'bad' ? 'bad' : 'ok', activity: Math.max(act, 0.06) })
   })
 
   const models = m?.models || []

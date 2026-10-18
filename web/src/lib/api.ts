@@ -47,6 +47,8 @@ export interface UiConfig {
   stations: { enabled: boolean }
   keylights: { enabled: boolean; writes: boolean }
   training: { enabled: boolean; label: string }
+  storage: { enabled: boolean }
+  darkbloom: { enabled: boolean }
   settings: { enabled: boolean }
   chat: { enabled: boolean; name: string; suggestions: string[] }
 }
@@ -97,11 +99,28 @@ export interface TrainingState {
   label?: string; phase?: string | null; job_id?: string | null; message?: string | null
   step?: number | null; total_steps?: number | null; pct?: number | null
   epoch?: number | null; loss?: number | null; learning_rate?: number | null
+  history?: { ts: number; step: number; loss: number }[]
 }
+export interface StorageState {
+  ts?: number; watch_ts?: number
+  volumes?: { label: string; path: string; total_gb: number | null; used_gb: number | null; free_gb: number | null; pct: number | null; err?: string | null }[]
+  watch?: { path: string; size_gb: number | null }[]
+}
+export interface DarkbloomState {
+  enabled?: boolean; ts: number; reachable: boolean; err: string | null
+  installed?: boolean | null; running?: boolean | null; version?: string | null; lifecycle?: string | null
+  earning?: boolean | null; verification_pending?: boolean | null
+  balance_usd?: number | null; withdrawable_usd?: number | null; total_usd?: number | null
+  requests_served?: number | null; tokens_generated?: number | null; last_credit_at?: number | null; model?: string | null
+}
+export interface BoardEvent { ts: number; kind: string; text: string }
 export interface Metrics {
   ts: number; version: string; read_only: boolean
   nodes: FleetNode[]; switch: SwitchState; history: Record<string, number[]>; models: ModelState[]
   training?: TrainingState
+  storage?: StorageState
+  darkbloom?: DarkbloomState
+  events?: BoardEvent[]
   agg: { gpu_count: number; total_power: number; hottest_unit: string | null; hottest_temp: number | null; all_ok: boolean; down: string[] }
   thresholds: { temp_warn: number; temp_hot: number; stale_after_s: number }
 }

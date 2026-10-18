@@ -1,4 +1,4 @@
-import type { AgentNode, DiscreteNode, Gpu, ModelState, SwitchState, TrainingState, UnifiedNode } from '../lib/api'
+import type { AgentNode, DarkbloomState, DiscreteNode, Gpu, ModelState, StorageState, SwitchState, TrainingState, UnifiedNode } from '../lib/api'
 import { fmtBps, fmtTps, fx, isNum, tempTone, tempWord } from '../lib/format'
 import { Bar, Big, Chip, Fresh, KV, Led, Panel, Pill, Sparkline } from '../components/Panel'
 
@@ -223,6 +223,61 @@ export function AgentCard({ a, stale }: { a: AgentNode; stale: number }) {
   )
 }
 
+export function StorageCard({ s }: { s: StorageState }) {
+  const vols = s.volumes || []
+  const worst = vols.reduce((a, v) => (isNum(v.pct) && v.pct > (a ?? -1) ? v.pct : a), null as number | null)
+  return (
+    <Panel id="card-storage"
+      title={<><Led on={vols.length > 0} /> <span>Storage</span></>}
+      chips={<>{isNum(worst) && <Chip tone={worst >= 90 ? 'bad' : worst >= 75 ? 'amber' : 'good'}>{worst.toFixed(0)}% fullest</Chip>}</>}>
+      {vols.map(v => (
+        <div key={v.path}>
+          <KV k={v.label}>{v.err ? v.err : isNum(v.pct) ? `${v.pct.toFixed(1)} % used · ${isNum(v.free_gb) ? v.free_gb.toFixed(0) : '-'} GB free` : '-'}</KV>
+          <Bar pct={v.pct} />
+        </div>
+      ))}
+      {(s.watch && s.watch.length > 0) && (
+        <>
+          <KV k="Biggest folders">{s.watch.length} tracked</KV>
+          {s.watch.slice(0, 5).map(w => (
+            <KV key={w.path} k={<span className="mono" style={{ fontSize: 11 }}>{w.path.replace(/^\/Users\/duckets/, '~')}</span>}>
+              {isNum(w.size_gb) ? `${w.size_gb.toFixed(1)} GB` : '—'}
+            </KV>
+          ))}
+        </>
+      )}
+      <Fresh ts={s.ts} err={null} staleAfter={120} />
+    </Panel>
+  )
+}
+
+export function DarkbloomCard({ d }: { d: DarkbloomState }) {
+  const reach = d.reachable
+  const running = reach && d.running === true
+  const lastCredit = isNum(d.last_credit_at) ? new Date(d.last_credit_at * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '-'
+  return (
+    <Panel id="card-darkbloom" dim={reach && !running}
+      title={<><Led on={running} /> <span>Darkbloom</span></>}
+      chips={<>{d.version && <Chip>v{d.version}</Chip>}<Chip tone={!reach ? 'bad' : running ? 'good' : 'bad'}>{!reach ? 'BRIDGE DOWN' : running ? (d.earning ? 'EARNING' : 'ONLINE') : 'PROVIDER DOWN'}</Chip></>}>
+      {reach ? (
+        <>
+          <div className="bigrow">
+            <Big label="Balance" value={isNum(d.balance_usd) ? `$${d.balance_usd.toFixed(2)}` : '-'} />
+            <Big label="Requests" value={isNum(d.requests_served) ? d.requests_served.toLocaleString() : '-'} small />
+          </div>
+          <KV k="Withdrawable">{isNum(d.withdrawable_usd) ? `$${d.withdrawable_usd.toFixed(4)}` : '-'}</KV>
+          <KV k="All-time earned">{isNum(d.total_usd) ? `$${d.total_usd.toFixed(4)}` : '-'}</KV>
+          <KV k="Tokens served">{isNum(d.tokens_generated) ? d.tokens_generated.toLocaleString() : '-'}</KV>
+          {d.lifecycle && <KV k="Lifecycle">{d.lifecycle}{d.verification_pending ? ' · verification pending' : ''}</KV>}
+          {d.model && <KV k="Warm model"><span className="mono" style={{ fontSize: 11 }}>{d.model}</span></KV>}
+          <KV k="Last credit">{lastCredit}</KV>
+        </>
+      ) : <p className="card__err">Not reporting: {d.err || 'no data'}</p>}
+      <Fresh ts={d.ts} err={reach ? null : d.err} staleAfter={180} />
+    </Panel>
+  )
+}
+
 export function TrainingCard({ t, stale }: { t: TrainingState; stale: number }) {
   const reach = t.reachable
   const running = reach && t.running
@@ -241,6 +296,23 @@ export function TrainingCard({ t, stale }: { t: TrainingState; stale: number }) 
           <Bar pct={t.pct} />
           <KV k="Learning rate">{isNum(t.learning_rate) ? t.learning_rate.toExponential(2) : '-'}</KV>
           {t.message && <KV k="Now"><span className="mono">{t.message}</span></KV>}
+          {(t.history && t.history.length > 1) && (() => {
+            const pts = t.history!
+            const step = Math.ceil(pts.length / 200)
+            const sample = pts.filter((_, i) => i % step === 0)
+            const losses = sample.map(p => p.loss)
+            const lo = Math.min(...losses), hi = Math.max(...losses)
+            const span = hi - lo || 1
+            const d = sample.map((p, i) => `${((i / Math.max(1, sample.length - 1)) * 100).toFixed(1)},${(26 - ((p.loss - lo) / span) * 24).toFixed(1)}`).join(' ')
+            return (
+              <>
+                <KV k="Loss curve"><span className="mono">{pts[0].loss.toFixed(3)} → {pts[pts.length - 1].loss.toFixed(3)} · min {lo.toFixed(3)} · {pts.length} pts</span></KV>
+                <svg viewBox="0 0 100 28" preserveAspectRatio="none" style={{ width: '100%', height: 56, display: 'block', color: 'var(--amber)' }} aria-label="training loss curve">
+                  <polyline points={d} fill="none" stroke="currentColor" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+                </svg>
+              </>
+            )
+          })()}
         </>
       ) : <p className="card__err">Not training right now{t.phase ? ` — phase: ${t.phase}` : ''}.</p>
       ) : <p className="card__err">Unsloth Studio unreachable: {t.err || 'no response'}</p>}

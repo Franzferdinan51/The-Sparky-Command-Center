@@ -21,6 +21,7 @@ lights) are refused while server.read_only is true, which is the default.
 
 import datetime
 import json
+import shutil
 import mimetypes
 import os
 import re
@@ -35,7 +36,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "2.2.0-juno"
+VERSION = "2.3.0-juno"
 
 
 # ----------------------------------------------------------------------------
@@ -74,6 +75,8 @@ DEFAULTS = {
     "stations": {"enabled": False, "items": []},
     "keylights": {"enabled": False, "url": ""},
     "training": {"enabled": False, "url": "", "label": "Training", "poll_seconds": 10},
+    "storage": {"enabled": False, "volumes": [], "watch": []},
+    "darkbloom": {"enabled": False, "bridge_url": "http://127.0.0.1:8901/api/darkbloom", "poll_seconds": 60},
     "chat": {
         "enabled": True,
         "name": "Juno",
@@ -189,6 +192,11 @@ STATE = {
     "models": {},
     "comfy": {},
     "training": {},
+    "events": [],
+    "train_hist": [],
+    "train_hist_job": None,
+    "storage": {},
+    "darkbloom": {},
 }
 _hist = {}
 
@@ -633,6 +641,7 @@ def _node_loop(node, offset):
             r = {"key": node["key"], "name": node.get("name"), "profile": node.get("profile"),
                  "reachable": False, "ts": time.time(), "err": str(e)[:140], "gpus": []}
         with _lock:
+            _prev_stored = STATE["nodes"].get(node["key"]) or {}
             if not r.get("reachable"):
                 # One bad poll (a slow bridge answer, a dropped SSH packet) must not
                 # flap a card to UNREACHABLE: keep the last good reading for the
@@ -649,6 +658,10 @@ def _node_loop(node, offset):
             else:
                 _fail_streak[node["key"]] = 0
                 STATE["nodes"][node["key"]] = r
+            _new_stored = STATE["nodes"].get(node["key"]) or {}
+            if _prev_stored.get("ts") and _prev_stored.get("reachable") != _new_stored.get("reachable"):
+                _push_event("node", "%s %s" % (node.get("name") or node["key"],
+                                               "back up" if _new_stored.get("reachable") else "went down"))
             if r.get("reachable"):
                 if r.get("profile") == "unified":
                     _push_hist("spark:%s:temp" % node["key"], r.get("temp"))
@@ -1133,6 +1146,8 @@ def read_tokens():
 # Reads the Studio backend's /api/train/status: phase, step/total, epoch, loss.
 # ----------------------------------------------------------------------------
 TRAINING = CFG.get("training") or {}
+STORAGE = CFG.get("storage") or {}
+DARKBLOOM = CFG.get("darkbloom") or {}
 
 
 def poll_training():
@@ -1168,6 +1183,13 @@ def poll_training():
     return res
 
 
+def _push_event(kind, text):
+    """Append to the board's event ring. Caller must hold _lock."""
+    ev = STATE.setdefault("events", [])
+    ev.insert(0, {"ts": time.time(), "kind": kind, "text": text})
+    del ev[40:]
+
+
 def _training_loop():
     while True:
         try:
@@ -1176,13 +1198,142 @@ def _training_loop():
             r = {"enabled": True, "reachable": False, "running": False,
                  "ts": time.time(), "err": str(e)[:140]}
         with _lock:
+            prev = STATE.get("training") or {}
+            if r.get("running") and not prev.get("running"):
+                _push_event("training", "Training started · %s" % (r.get("label") or "run"))
+            elif prev.get("running") and not r.get("running"):
+                _push_event("training", "Training stopped · step %s of %s" % (prev.get("step"), prev.get("total_steps")))
             STATE["training"] = r
+            # Loss history for the Training card's chart, persisted per job so a
+            # server restart keeps the curve.
+            if r.get("running") and r.get("step") is not None and r.get("loss") is not None:
+                if STATE.get("train_hist_job") != r.get("job_id"):
+                    STATE["train_hist"] = []
+                    STATE["train_hist_job"] = r.get("job_id")
+                hist = STATE["train_hist"]
+                if not hist or hist[-1]["step"] != r["step"]:
+                    hist.append({"ts": r["ts"], "step": r["step"], "loss": r["loss"]})
+                    del hist[:-1500]
+                    if r["step"] % 10 == 0:
+                        try:
+                            with open(_abs("data/training-history.json"), "w") as f:
+                                json.dump({"job_id": r.get("job_id"), "points": hist}, f)
+                        except Exception:  # noqa
+                            pass
         time.sleep(float(TRAINING.get("poll_seconds") or 10))
 
 
 # ----------------------------------------------------------------------------
 # Snapshot (shape kept compatible with the v1 /api/metrics for API consumers)
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Storage: volume free/used from disk_usage (cheap, 30s) plus a slow watchlist
+# of directory sizes via du (every ~10 min — du on big trees is expensive and
+# ~/Documents can stall on iCloud materialization, so it stays off the fast loop).
+# ----------------------------------------------------------------------------
+def poll_storage_volumes():
+    vols = []
+    for v in STORAGE.get("volumes") or []:
+        path = os.path.expanduser(v.get("path") or "/")
+        try:
+            u = shutil.disk_usage(path)
+            vols.append({"label": v.get("label") or path, "path": path,
+                         "total_gb": round(u.total / 1e9, 1), "used_gb": round(u.used / 1e9, 1),
+                         "free_gb": round(u.free / 1e9, 1),
+                         "pct": round(u.used / u.total * 100, 1) if u.total else None, "err": None})
+        except Exception as e:  # noqa
+            vols.append({"label": v.get("label") or path, "path": path, "err": str(e)[:80],
+                         "total_gb": None, "used_gb": None, "free_gb": None, "pct": None})
+    return vols
+
+
+def poll_storage_watch():
+    out = []
+    for p in STORAGE.get("watch") or []:
+        path = os.path.expanduser(p)
+        rc, o, _e = _run(["du", "-sk", path], timeout=180)
+        size_gb = None
+        if rc == 0 and o.strip():
+            try:
+                size_gb = round(int(o.split()[0]) * 1024 / 1e9, 1)
+            except Exception:  # noqa
+                pass
+        out.append({"path": p, "size_gb": size_gb})
+    out.sort(key=lambda w: (w["size_gb"] is None, -(w["size_gb"] or 0)))
+    return out
+
+
+def _storage_loop():
+    cycle = 0
+    while True:
+        try:
+            vols = poll_storage_volumes()
+            with _lock:
+                cur = dict(STATE.get("storage") or {})
+                cur.update({"ts": time.time(), "volumes": vols})
+                STATE["storage"] = cur
+            if cycle % 20 == 0:
+                watch = poll_storage_watch()
+                with _lock:
+                    cur = dict(STATE.get("storage") or {})
+                    cur.update({"watch": watch, "watch_ts": time.time()})
+                    STATE["storage"] = cur
+        except Exception:  # noqa
+            pass
+        cycle += 1
+        time.sleep(30)
+
+
+# ----------------------------------------------------------------------------
+# Darkbloom: the Mac Studio Dashboard bridge already parses the provider's
+# state file + earnings; this poller just normalizes its /api/darkbloom.
+# ----------------------------------------------------------------------------
+def poll_darkbloom():
+    res = {"enabled": True, "ts": time.time(), "reachable": False, "err": None,
+           "installed": None, "running": None, "version": None, "lifecycle": None,
+           "earning": None, "verification_pending": None, "balance_usd": None,
+           "withdrawable_usd": None, "total_usd": None, "requests_served": None,
+           "tokens_generated": None, "last_credit_at": None, "model": None}
+    url = (DARKBLOOM.get("bridge_url") or "http://127.0.0.1:8901/api/darkbloom").rstrip("/")
+    ok, body = _http_get(url, timeout=8)
+    if not ok:
+        res["err"] = "bridge unreachable"
+        return res
+    try:
+        d = (json.loads(body) or {}).get("darkbloom") or {}
+        earn = d.get("earnings") or {}
+        stats = d.get("stats") or {}
+        warm = d.get("warm_models") or d.get("advertised_models") or []
+
+        def fnum(v):
+            try:
+                return float(v)
+            except Exception:  # noqa
+                return None
+
+        res.update({"reachable": True, "installed": d.get("installed"), "running": d.get("running"),
+                    "version": d.get("version"), "lifecycle": d.get("lifecycle"),
+                    "earning": d.get("earning"), "verification_pending": d.get("verification_pending"),
+                    "balance_usd": fnum(earn.get("balance_usd")), "withdrawable_usd": fnum(earn.get("withdrawable_usd")),
+                    "total_usd": fnum(earn.get("total_usd")), "requests_served": stats.get("requests_served"),
+                    "tokens_generated": stats.get("tokens_generated"), "last_credit_at": d.get("last_credit_at"),
+                    "model": warm[0] if warm else None})
+    except Exception as e:  # noqa
+        res["err"] = ("parse: %s" % e)[:140]
+    return res
+
+
+def _darkbloom_loop():
+    while True:
+        try:
+            r = poll_darkbloom()
+        except Exception as e:  # noqa
+            r = {"enabled": True, "ts": time.time(), "reachable": False, "err": str(e)[:140]}
+        with _lock:
+            STATE["darkbloom"] = r
+        time.sleep(float(DARKBLOOM.get("poll_seconds") or 60))
+
+
 def start_pollers():
     for i, n in enumerate(NODES):
         threading.Thread(target=_node_loop, args=(n, i * 1.2), daemon=True).start()
@@ -1201,7 +1352,18 @@ def start_pollers():
     if TOK.get("enabled", True) and TOK.get("mode", "bank") == "bank" and _token_models():
         threading.Thread(target=_tok_loop, daemon=True).start()
     if TRAINING.get("enabled"):
+        try:
+            with open(_abs("data/training-history.json")) as f:
+                saved = json.load(f)
+            STATE["train_hist"] = saved.get("points") or []
+            STATE["train_hist_job"] = saved.get("job_id")
+        except Exception:  # noqa
+            pass
         threading.Thread(target=_training_loop, daemon=True).start()
+    if STORAGE.get("enabled"):
+        threading.Thread(target=_storage_loop, daemon=True).start()
+    if DARKBLOOM.get("enabled"):
+        threading.Thread(target=_darkbloom_loop, daemon=True).start()
 
 
 def snapshot():
@@ -1211,6 +1373,10 @@ def snapshot():
         hist = {k: list(v) for k, v in _hist.items()}
         models = [dict(STATE["models"][m["key"]]) for m in MODELS if m["key"] in STATE["models"]]
         training = dict(STATE.get("training") or {})
+        training["history"] = list(STATE.get("train_hist") or [])
+        storage = dict(STATE.get("storage") or {})
+        darkbloom = dict(STATE.get("darkbloom") or {})
+        events = list(STATE.get("events") or [])
     sd = CFG["defaults"]
     unified = [x for x in nodes if x.get("profile") == "unified"]
     discrete = [x for x in nodes if x.get("profile") != "unified"]
@@ -1259,6 +1425,9 @@ def snapshot():
         "glm_model": next((n.get("serving") for n in NODES if n.get("serving")), None),
         "models": models,
         "training": training,
+        "storage": storage,
+        "darkbloom": darkbloom,
+        "events": events,
         "spark_models": by_unit("spark"),
         "box_models": by_unit("box"),
         "ds4_models": by_unit("ds4"),
@@ -1684,6 +1853,8 @@ def public_config():
         "training": {"enabled": bool(TRAINING.get("enabled")),
                      "label": TRAINING.get("label") or "Training"},
         "settings": {"enabled": True},
+        "storage": {"enabled": bool(STORAGE.get("enabled"))},
+        "darkbloom": {"enabled": bool(DARKBLOOM.get("enabled"))},
         "keylights": {"enabled": bool(CFG["keylights"].get("enabled")),
                       "writes": bool(CFG["keylights"].get("allow_writes")) and not READ_ONLY},
         "chat": {"enabled": bool(CHAT.get("enabled", True)), "name": CHAT.get("name") or "Juno",

@@ -4,7 +4,8 @@ import { useLayout } from '../lib/layout'
 import { Module } from '../components/Module'
 import { ThemeMenu } from '../components/ThemeMenu'
 import { Empty } from '../components/Panel'
-import { UnifiedCard, GpuCard, HostCard, SwitchCard, ModelCard, TrainingCard, AgentCard } from './Cards'
+import { UnifiedCard, GpuCard, HostCard, SwitchCard, ModelCard, TrainingCard, AgentCard, StorageCard, DarkbloomCard } from './Cards'
+import { KV, Panel } from '../components/Panel'
 import { Settings } from './Settings'
 import { Video } from './Video'
 import { Tokens } from './Tokens'
@@ -121,6 +122,21 @@ function FleetSection({ s, subs, toggleSub }: { s: SectionCfg; subs: string[]; t
           {agents.map(a => a.profile === 'agent' && (
             <AgentCard key={a.key} a={a} stale={Math.max(th.stale_after_s, 90)} />
           ))}
+        </div>
+      )}
+      {(config.storage?.enabled || config.darkbloom?.enabled) && (metrics.storage || metrics.darkbloom) && (
+        <div className="cards cards--4">
+          {config.storage?.enabled && metrics.storage && <StorageCard s={metrics.storage} />}
+          {config.darkbloom?.enabled && metrics.darkbloom && <DarkbloomCard d={metrics.darkbloom} />}
+        </div>
+      )}
+      {metrics.events && metrics.events.length > 0 && (
+        <div className="cards cards--1">
+          <Panel className="card--wide" id="card-events" title={<span>Events</span>}>
+            {metrics.events.slice(0, 6).map((e, i) => (
+              <KV key={`${e.ts}-${i}`} k={new Date(e.ts * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}>{e.text}</KV>
+            ))}
+          </Panel>
         </div>
       )}
       {s.switch && config.switch && (

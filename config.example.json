@@ -34,6 +34,11 @@
     }
   ],
   "comfy_title": "Render lanes \u00b7 ComfyUI",
+  "darkbloom": {
+    "bridge_url": "http://127.0.0.1:8901/api/darkbloom",
+    "enabled": true,
+    "poll_seconds": 60
+  },
   "defaults": {
     "model_poll_interval": 6.0,
     "poll_interval": 7.0,
@@ -199,6 +204,26 @@
         "probe_url": "http://127.0.0.1:8901/api/darkbloom",
         "url": "http://ryans-mac-mini:8901/"
       }
+    ]
+  },
+  "storage": {
+    "enabled": true,
+    "volumes": [
+      {
+        "label": "Internal",
+        "path": "/"
+      },
+      {
+        "label": "Sabrent",
+        "path": "/Volumes/Sabrent"
+      }
+    ],
+    "watch": [
+      "~/.cache/huggingface",
+      "~/Documents/datasets",
+      "~/Library/Caches",
+      "/Volumes/Sabrent/ComfyUI-models",
+      "/Volumes/Sabrent/DuckBot-Training-Archive"
     ]
   },
   "switch": {
