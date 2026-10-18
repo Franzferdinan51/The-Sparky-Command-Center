@@ -19,6 +19,7 @@ Monitoring is READ-ONLY. Every remote command only queries state (nvidia-smi que
 lights) are refused while server.read_only is true, which is the default.
 """
 
+import concurrent.futures
 import datetime
 import json
 import shutil
@@ -1248,17 +1249,22 @@ def poll_storage_volumes():
 
 
 def poll_storage_watch():
-    out = []
-    for p in STORAGE.get("watch") or []:
+    # du runs in parallel with a long timeout: the Sabrent trees are 130-210 GB
+    # and ~/Documents can stall on iCloud materialization. A folder that still
+    # times out reports None (shown as —) rather than a wrong number.
+    def one(p):
         path = os.path.expanduser(p)
-        rc, o, _e = _run(["du", "-sk", path], timeout=180)
+        rc, o, _e = _run(["du", "-sk", path], timeout=900)
         size_gb = None
         if rc == 0 and o.strip():
             try:
                 size_gb = round(int(o.split()[0]) * 1024 / 1e9, 1)
             except Exception:  # noqa
                 pass
-        out.append({"path": p, "size_gb": size_gb})
+        return {"path": p, "size_gb": size_gb}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        out = list(ex.map(one, STORAGE.get("watch") or []))
     out.sort(key=lambda w: (w["size_gb"] is None, -(w["size_gb"] or 0)))
     return out
 
